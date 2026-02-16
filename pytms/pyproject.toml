@@ -1,0 +1,52 @@
+[project]
+name = "pytms"
+version = "0.1.1"
+description = "A transport simulator built for transport research"
+readme = "README.md"
+authors = [
+  { name = "Chris Davis", email = "chris.davis.ee@gmail.com" },
+]
+requires-python = ">=3.12"
+license = "MIT"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "networkx>=3.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/cxd309/pytms"
+Engine = "https://github.com/cxd309/tms-engine"
+Issues = "https://github.com/cxd309/pytms/issues"
+
+[build-system]
+requires = ["uv_build>=0.9.21,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+package = true
+
+[tool.uv.sources]
+
+[tool.hatch.build.targets.wheel]
+include = ["src/pytms"]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.15.1",
+]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "e2e: end-to-end tests requiring the tms-engine binary on PATH",
+]

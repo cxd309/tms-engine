@@ -1,0 +1,31 @@
+# Go build artefacts
+*.test
+*.out
+coverage.*
+*.coverprofile
+
+# Go workspace
+go.work
+go.work.sum
+
+# Environment
+.env
+
+# Build output
+dist/
+
+# JetBrains
+.idea/
+
+# Work in progress
+wip/
+
+# Python
+pytms/.venv/
+pytms/dist/
+**/__pycache__/
+**/.pytest_cache/
+*.pyc
+-e 
+# Claude Code
+.claude/
