@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sync"
 
 	"github.com/cxd309/tms-engine/internal/graph"
 	"github.com/cxd309/tms-engine/internal/service"
@@ -71,9 +72,22 @@ func (t *TMS) step() (SimulationLogRow, error) {
 	dt := t.meta.TimeStep
 
 	// Pass 1: compute the minimal MA (braking-distance safety envelope) for each service.
+	// Each goroutine writes to its own slice index — no mutex needed.
+	// wg.Wait() provides the happens-before guarantee before map assembly.
+	maSlice := make([]movementAuthority, len(t.services))
+	var wg sync.WaitGroup
+	wg.Add(len(t.services))
+	for i, svc := range t.services {
+		go func() {
+			defer wg.Done()
+			maSlice[i] = svc.BrakingDistance()
+		}()
+	}
+	wg.Wait()
+
 	minMAs := make(map[string]movementAuthority, len(t.services))
-	for _, svc := range t.services {
-		minMAs[svc.ServiceID] = svc.BrakingDistance()
+	for i, svc := range t.services {
+		minMAs[svc.ServiceID] = maSlice[i]
 	}
 
 	// Pass 2: propose, grant, and apply movement for each service.
