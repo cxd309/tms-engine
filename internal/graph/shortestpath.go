@@ -62,22 +62,34 @@ func (g *Graph) reconstructPath(u, v NodeID) []NodeID {
 }
 
 // GetShortestPath returns the shortest path between start and end, using a cache.
-// Returns an error if no path exists.
+// Returns an error if no path exists. Safe for concurrent use.
 func (g *Graph) GetShortestPath(start, end NodeID) (PathInfo, error) {
 	if start == end {
 		return PathInfo{ID: pathKey(start, end), Route: []NodeID{start}, Length: 0}, nil
 	}
 	key := pathKey(start, end)
-	if p, ok := g.pathCache[key]; ok {
+
+	// Fast path: cache hit under read lock.
+	g.pathMu.RLock()
+	p, ok := g.pathCache[key]
+	g.pathMu.RUnlock()
+	if ok {
+		return p, nil
+	}
+
+	// Slow path: compute and cache under write lock.
+	g.pathMu.Lock()
+	defer g.pathMu.Unlock()
+	if p, ok = g.pathCache[key]; ok { // double-check after acquiring write lock
 		return p, nil
 	}
 	g.ensureShortestPaths()
-	d, ok := g.dist[start][end]
-	if !ok || math.IsInf(d, 1) {
+	d, ok2 := g.dist[start][end]
+	if !ok2 || math.IsInf(d, 1) {
 		return PathInfo{}, fmt.Errorf("no path from %q to %q", start, end)
 	}
 	route := g.reconstructPath(start, end)
-	p := PathInfo{ID: key, Route: route, Length: d}
+	p = PathInfo{ID: key, Route: route, Length: d}
 	g.pathCache[key] = p
 	return p, nil
 }

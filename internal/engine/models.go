@@ -34,6 +34,15 @@ type SimulationLog struct {
 // movementAuthority is the distance ahead (metres) a service is authorised to travel.
 type movementAuthority = float64
 
+// serviceProposal stores the kinematic proposal computed for a service in Pass 2,
+// before movement authorities are applied in Pass 3.
+type serviceProposal struct {
+	skip         bool                 // true for stationary/dwelling — no movement this step
+	proposedDist float64
+	newVelocity  float64
+	newState     service.ServiceState
+}
+
 // speedLimitInfo carries effective speed limit context derived from the graph for
 // a single service at a single timestep.
 type speedLimitInfo struct {

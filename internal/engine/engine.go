@@ -90,33 +90,58 @@ func (t *TMS) step() (SimulationLogRow, error) {
 		minMAs[svc.ServiceID] = maSlice[i]
 	}
 
-	// Pass 2: propose, grant, and apply movement for each service.
-	for _, svc := range t.services {
-		switch svc.State {
-		case service.StateStationary:
-			// Hold until the departure delay has elapsed, then start moving.
-			if t.curTime < svc.DepartureDelay {
-				continue
+	// Pass 2: compute kinematic proposals concurrently.
+	// Each goroutine reads only its own service and the (mutex-protected) graph.
+	proposals := make([]serviceProposal, len(t.services))
+	errCh := make(chan error, len(t.services))
+	var wg2 sync.WaitGroup
+	wg2.Add(len(t.services))
+	for i, svc := range t.services {
+		go func() {
+			defer wg2.Done()
+			switch svc.State {
+			case service.StateStationary:
+				// Hold until the departure delay has elapsed, then start moving.
+				if t.curTime >= svc.DepartureDelay {
+					svc.State = service.StateAccelerating
+				}
+				proposals[i].skip = true
+				return
+			case service.StateDwelling:
+				svc.AdvanceDwell(dt)
+				proposals[i].skip = true
+				return
 			}
-			svc.State = service.StateAccelerating
+
+			distToStop, err := t.distanceToNextStop(svc)
+			if err != nil {
+				errCh <- fmt.Errorf("service %q distance to stop: %w", svc.ServiceID, err)
+				return
+			}
+			sl, err := t.getSpeedLimitInfo(svc)
+			if err != nil {
+				errCh <- fmt.Errorf("service %q speed limit info: %w", svc.ServiceID, err)
+				return
+			}
+			proposedDist, newVelocity, newState := proposeMovement(svc, dt, distToStop, sl)
+			proposals[i] = serviceProposal{
+				proposedDist: proposedDist,
+				newVelocity:  newVelocity,
+				newState:     newState,
+			}
+		}()
+	}
+	wg2.Wait()
+	close(errCh)
+	if err := <-errCh; err != nil {
+		return SimulationLogRow{}, err
+	}
+
+	// Pass 3: apply movement authorities and update positions — serial.
+	for i, svc := range t.services {
+		if proposals[i].skip {
 			continue
-		case service.StateDwelling:
-			svc.AdvanceDwell(dt)
-			continue
 		}
-
-		distToStop, err := t.distanceToNextStop(svc)
-		if err != nil {
-			return SimulationLogRow{}, fmt.Errorf("service %q distance to stop: %w", svc.ServiceID, err)
-		}
-
-		sl, err := t.getSpeedLimitInfo(svc)
-		if err != nil {
-			return SimulationLogRow{}, fmt.Errorf("service %q speed limit info: %w", svc.ServiceID, err)
-		}
-
-		// Kinematic proposal: how far would this service travel in dt with no MA constraints?
-		proposedDist, newVelocity, newState := proposeMovement(svc, dt, distToStop, sl)
 
 		// MA check: how far is the service allowed to travel given other services' safety envelopes?
 		maxAllowed, err := t.computeMaxAllowedDistance(svc, minMAs)
@@ -124,10 +149,12 @@ func (t *TMS) step() (SimulationLogRow, error) {
 			return SimulationLogRow{}, fmt.Errorf("service %q MA check: %w", svc.ServiceID, err)
 		}
 
-		grantedDist := math.Min(proposedDist, maxAllowed)
+		grantedDist := math.Min(proposals[i].proposedDist, maxAllowed)
+		newVelocity := proposals[i].newVelocity
+		newState := proposals[i].newState
 
 		// If MA trims the movement, recompute velocity from the shorter granted distance.
-		if grantedDist < proposedDist {
+		if grantedDist < proposals[i].proposedDist {
 			newVelocity, newState = constrainedKinematics(svc, grantedDist)
 		}
 

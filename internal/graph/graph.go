@@ -4,6 +4,7 @@ package graph
 
 import (
 	"fmt"
+	"sync"
 )
 
 // NodeID, EdgeID, PathID are string aliases used as identifiers.
@@ -87,6 +88,7 @@ type Graph struct {
 	nextNode map[NodeID]map[NodeID]NodeID
 	// Path cache; cleared whenever the graph topology changes.
 	pathCache map[PathID]PathInfo
+	pathMu    sync.RWMutex // protects pathCache for concurrent access
 }
 
 // NewGraph builds a Graph from GraphData, returning an error if any node or edge
