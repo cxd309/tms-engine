@@ -85,6 +85,15 @@ func (t *TMS) step() (SimulationLogRow, error) {
 	// TODO: dwelling and stationary services hit continue without updating grantedMAs,
 	// so their entry stays at minMAs (braking distance) for the whole pass.
 
+	// TODO: granted MAs are based on order, the first granted have precedence.
+	// Add user defined precendence based on vehicle or track class.
+
+	// TODO: add goroutines. Computation of minimal and proposed MAs are independent
+	// and could gain advantage from being concurrent. This will probably result in:
+	// Step 1: calculate minimal MA
+	// Step 2: calculate proposed MA
+	// Step 3: calcualte granted MAs by trimming proposed MAs based on precedence.
+
 	// Pass 2: propose, grant, and apply movement for each service.
 	for _, svc := range t.services {
 		switch svc.State {
