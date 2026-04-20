@@ -6,13 +6,14 @@
 //     which is the track ahead it physically needs to stop (braking distance).
 //
 //  2. Motion pass - every service proposes its desired movement, has that
-//     proposal trimmed by the MA record from pass 1 and any edge speed limits,
+//     proposal trimmed by the MA record and any edge speed limits,
 //     then updates its position, velocity, and state accordingly.
 package engine
 
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 
 	"github.com/cxd309/tms-engine/internal/graph"
@@ -76,6 +77,14 @@ func (t *TMS) step() (SimulationLogRow, error) {
 		minMAs[svc.ServiceID] = svc.BrakingDistance()
 	}
 
+	// grantedMAs starts as minMAs and grows as each service is granted movement this
+	// step, so that following services cannot enter space already granted.
+	grantedMAs := make(map[string]movementAuthority, len(t.services))
+	maps.Copy(grantedMAs, minMAs)
+
+	// TODO: dwelling and stationary services hit continue without updating grantedMAs,
+	// so their entry stays at minMAs (braking distance) for the whole pass.
+
 	// Pass 2: propose, grant, and apply movement for each service.
 	for _, svc := range t.services {
 		switch svc.State {
@@ -105,12 +114,13 @@ func (t *TMS) step() (SimulationLogRow, error) {
 		proposedDist, newVelocity, newState := proposeMovement(svc, dt, distToStop, sl)
 
 		// MA check: how far is the service allowed to travel given other services' safety envelopes?
-		maxAllowed, err := t.computeMaxAllowedDistance(svc, minMAs)
+		maxAllowed, err := t.computeMaxAllowedDistance(svc, proposedDist, grantedMAs)
 		if err != nil {
 			return SimulationLogRow{}, fmt.Errorf("service %q MA check: %w", svc.ServiceID, err)
 		}
 
 		grantedDist := math.Min(proposedDist, maxAllowed)
+		grantedMAs[svc.ServiceID] = math.Max(grantedDist, minMAs[svc.ServiceID])
 
 		// If MA trims the movement, recompute velocity from the shorter granted distance.
 		if grantedDist < proposedDist {
@@ -191,43 +201,89 @@ func (t *TMS) getSpeedLimitInfo(svc *service.SimService) (speedLimitInfo, error)
 	return speedLimitInfo{currentMax: currentMax, distToChange: distToChange, nextMax: nextMax}, nil
 }
 
-// computeMaxAllowedDistance returns the maximum distance svc may travel without
-// entering any other service's safety envelope (minimal MA + vehicle length).
-//
-// TODO: extend to full segment-based MA comparison for branching networks.
-// Currently only checks services on the same edge.
-func (t *TMS) computeMaxAllowedDistance(svc *service.SimService, minMAs map[string]movementAuthority) (float64, error) {
-	maxDist := math.Inf(1)
+// projectPath returns the path svc would travel if it moved dist metres from its
+// current position, as an ordered slice of Segments. The path follows the shortest
+// route toward svc.NextStop and stops early if the next stop is reached.
+func (t *TMS) projectPath(svc *service.SimService, dist float64) ([]graph.Segment, error) {
+	var segments []graph.Segment
+	pos := svc.CurrentPosition
+	remaining := dist
 
+	for remaining > 1e-9 {
+		edge, err := t.graph.GetEdgeByID(pos.Edge)
+		if err != nil {
+			return nil, err
+		}
+		spaceOnEdge := edge.Length - pos.DistanceAlongEdge
+		take := math.Min(remaining, spaceOnEdge)
+
+		segments = append(segments, graph.Segment{
+			Edge:  edge.ID,
+			Start: pos.DistanceAlongEdge,
+			End:   pos.DistanceAlongEdge + take,
+		})
+		remaining -= take
+
+		if remaining > 1e-9 {
+			if edge.V == svc.NextStop {
+				break // do not project beyond next stop
+			}
+			nextEdge, err := t.graph.GetNextEdge(edge.V, svc.NextStop)
+			if err != nil {
+				return nil, fmt.Errorf("projecting path past edge %q: %w", edge.ID, err)
+			}
+			pos = graph.Position{Edge: nextEdge.ID, DistanceAlongEdge: 0}
+		}
+	}
+	return segments, nil
+}
+
+// trimByOther walks path and returns the maximum distance svc may travel before
+// entering other's safety zone (rear − braking distance). Returns (dist, true) when
+// other lies ahead on the path, or (0, false) when other is not on the path at all.
+func trimByOther(path []graph.Segment, other *service.SimService, otherMA movementAuthority) (float64, bool) {
+	zoneStart := math.Max(0, other.CurrentPosition.DistanceAlongEdge-other.Vehicle.Length-otherMA)
+
+	cumDist := 0.0
+	for _, seg := range path {
+		if seg.Edge != other.CurrentPosition.Edge {
+			cumDist += seg.Length()
+			continue
+		}
+		// other is on this edge — check whether the path enters the zone
+		if seg.Start >= zoneStart {
+			// path already starts inside (or at) the zone
+			return cumDist, true
+		}
+		if seg.End > zoneStart {
+			// zone boundary falls within this segment
+			return cumDist + (zoneStart - seg.Start), true
+		}
+		// path exits the edge before reaching the zone — other is behind on this edge
+		return 0, false
+	}
+	return 0, false
+}
+
+// computeMaxAllowedDistance projects svc's proposed path as segments and trims it
+// against every other service's safety envelope, returning the maximum distance svc
+// may travel this timestep.
+func (t *TMS) computeMaxAllowedDistance(svc *service.SimService, proposedDist float64, minMAs map[string]movementAuthority) (float64, error) {
+	path, err := t.projectPath(svc, proposedDist)
+	if err != nil {
+		return 0, err
+	}
+
+	maxDist := proposedDist
 	for _, other := range t.services {
 		if other.ServiceID == svc.ServiceID {
 			continue
 		}
-
-		// Only check services ahead on the same edge.
-		// TODO: resolve conflicts across edge boundaries for full network coverage.
-		if other.CurrentPosition.Edge != svc.CurrentPosition.Edge {
-			continue
+		if allowed, found := trimByOther(path, other, minMAs[other.ServiceID]); found {
+			if allowed < maxDist {
+				maxDist = allowed
+			}
 		}
-
-		otherPos := other.CurrentPosition.DistanceAlongEdge
-		myPos := svc.CurrentPosition.DistanceAlongEdge
-
-		if otherPos <= myPos {
-			continue // other is behind or level
-		}
-
-		// Other's protected zone: from its rear (front − length) minus its braking distance.
-		// We must not enter that zone.
-		safetyZoneStart := otherPos - other.Vehicle.Length - minMAs[other.ServiceID]
-		allowed := safetyZoneStart - myPos
-		if allowed < maxDist {
-			maxDist = allowed
-		}
-	}
-
-	if math.IsInf(maxDist, 1) {
-		return math.MaxFloat64, nil
 	}
 	return math.Max(0, maxDist), nil
 }
